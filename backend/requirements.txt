@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-requests
-pydantic
 numpy
+requests
+selfies
 rdkit
-scikit-learn
-python-dotenv
+pydantic
+python-multipart
