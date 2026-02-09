@@ -6,3 +6,4 @@ selfies
 rdkit
 pydantic
 python-multipart
+scikit-learn
