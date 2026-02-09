@@ -1,25 +1,27 @@
-# Use an official Python runtime as a parent image
+# 1. Base Image (Slim = Tiny)
 FROM python:3.10-slim
 
-# Set the working directory in the container
+# 2. Set working directory
 WORKDIR /app
 
-# Copy the requirements file into the container
+# 3. Install System Dependencies (Only what RDKit needs)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxrender1 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 4. Copy ONLY requirements first (for caching)
 COPY requirements.txt .
 
-# Install any needed packages specified in requirements.txt
+# 5. Install PyTorch CPU-ONLY (The Magic Step)
+# This prevents downloading 4GB of CUDA drivers
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# 6. Install other deps
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the working directory contents into the container at /app/backend
-COPY . ./backend
+# 7. Copy the rest of your code
+COPY backend/ ./backend/
 
-# Make port 8000 available to the world outside this container
-EXPOSE 8000
-
-# Define environment variable
-ENV PORT=8000
-ENV HOST=0.0.0.0
-ENV PYTHONPATH=/app
-
-# Run app.py when the container launches
+# 8. Run
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

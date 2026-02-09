@@ -3,7 +3,6 @@ uvicorn
 requests
 pydantic
 numpy
-torch
 rdkit
 scikit-learn
 python-dotenv
