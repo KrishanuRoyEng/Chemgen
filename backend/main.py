@@ -119,28 +119,43 @@ class DesignRequest(BaseModel):
     logp: Optional[float] = None
 
 # HELPER: Safe Diffusion
-def run_diffusion_safe(vector, steps=30, temp=1.0):
-    try:
+# ⚡ UPDATED DIFFUSION FUNCTION ⚡
+def run_diffusion_safe(vector, steps=15, temp=1.5):
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
         if not model: return None, ["❌ Model not loaded"]
 
+        # 1. Start with Random Noise
         x = torch.randint(0, vocab, (1, 100)).to(dev)
         props = torch.tensor(vector, dtype=torch.float32).to(dev)
         
+        # 2. Loop fewer times (15 instead of 30)
         for t in reversed(range(steps)):
             time = torch.tensor([t]).float().to(dev)
-            with torch.no_grad(): logits = model(x, time, props)
+            with torch.no_grad(): 
+                logits = model(x, time, props)
+            
+            # 3. Increase randomness (Temp 1.5 makes it creative)
+            # Higher temp = More wild/novel molecules
+            # Lower temp = Safe/Known molecules
             probs = torch.softmax(logits / temp, dim=-1)
             
             if torch.isnan(probs).any(): return None, ["❌ NaN Detected"]
+            
+            # Sample from the distribution
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
+            
+            # Update sequence
             mask = torch.rand_like(x.float()) > (t/steps)
             x = torch.where(mask, pred, x)
             
         tokens = [ml_context['itos'].get(i, "") for i in x[0].cpu().tolist()]
         valid = [t for t in tokens if t not in ["[nop]", "[MASK]"]]
-        try: return sf.decoder("".join(valid)), ["✅ Decoded"]
-        except: return None, ["⚠️ Decoder Failed"]
+        try: 
+            smiles = sf.decoder("".join(valid))
+            return smiles, [f"✅ Decoded (Steps={steps}, T={temp})"]
+        except: 
+            return None, ["⚠️ Decoder Failed"]
+            
     except Exception as e: return None, [f"❌ Crash: {e}"]
 
 @app.post("/generate")
