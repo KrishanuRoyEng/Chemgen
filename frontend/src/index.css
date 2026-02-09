@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-cyber-black text-white font-sans antialiased;
+    overflow-x: hidden;
+  }
+}
+
+.glass-panel {
+  @apply bg-cyber-slate/60 backdrop-blur-xl border border-white/10 rounded-xl shadow-lg;
+}
+
+.neon-text-green {
+  text-shadow: 0 0 5px #00ff9d, 0 0 10px #00ff9d;
+}
+
+.neon-text-blue {
+  text-shadow: 0 0 5px #00d0ff, 0 0 10px #00d0ff;
+}
+
+.neon-text-purple {
+  text-shadow: 0 0 5px #bf00ff, 0 0 10px #bf00ff;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a; 
+}
+::-webkit-scrollbar-thumb {
+  background: #333; 
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555; 
+}
