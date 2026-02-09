@@ -1,6 +1,10 @@
 # backend/.dockerignore
 .git
+.gitignore
 .venv
 venv
 __pycache__
 *.pyc
+*.pth
+backend/__pycache__
+node_modules
