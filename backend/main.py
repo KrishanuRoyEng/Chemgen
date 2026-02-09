@@ -22,7 +22,7 @@ MODEL_FILENAME = "universal_diffusion_model.pth"
 MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 
 # 🚨 PASTE YOUR HUGGING FACE LINK HERE 🚨
-MODEL_URL = "https://huggingface.co/YOUR_USERNAME/YOUR_REPO/resolve/main/universal_diffusion_model.pth" 
+MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/f6d1065ce8ca4db108bc9fc20fc25e8cec2e55d7/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
     """Ensures the real binary model exists."""
