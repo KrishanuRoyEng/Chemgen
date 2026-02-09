@@ -21,13 +21,13 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = "universal_diffusion_model.pth"
 MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 
-# 🚨 PASTE YOUR HUGGING FACE LINK HERE 🚨
-MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/f6d1065ce8ca4db108bc9fc20fc25e8cec2e55d7/universal_diffusion_model.pth" 
+# 🚨 REPLACE WITH YOUR EXACT HUGGING FACE LINK 🚨
+MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
     """Ensures the real binary model exists."""
     if os.path.exists(MODEL_PATH):
-        # Check if it's a fake LFS pointer (files < 1MB are suspicious)
+        # Check if it's a fake LFS pointer (files < 5MB are suspicious)
         size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
         if size_mb < 5.0: 
             print(f"⚠️ Found LFS pointer/corrupt file ({size_mb:.2f} MB). Deleting...")
@@ -80,12 +80,13 @@ class SelfiesDiffusion(nn.Module):
 async def lifespan(app: FastAPI):
     print(f"🚀 MONOLITH STARTUP")
     
-    # 1. DOWNLOAD
+    # 1. DOWNLOAD (If missing)
     download_model_if_needed()
 
     # 2. LOAD
     if os.path.exists(MODEL_PATH):
         try:
+            # Load to CPU
             checkpoint = torch.load(MODEL_PATH, map_location=ml_context['device'], weights_only=False)
             ml_context['vocab_size'] = checkpoint['vocab_size']
             ml_context['props_cols'] = checkpoint.get('props', [])
@@ -118,45 +119,42 @@ class DesignRequest(BaseModel):
     mw: Optional[float] = None
     logp: Optional[float] = None
 
-# HELPER: Safe Diffusion
-# ⚡ UPDATED DIFFUSION FUNCTION ⚡
+# HELPER: Safe Diffusion (Updated for Speed & Chaos)
 def run_diffusion_safe(vector, steps=15, temp=1.5):
+    try:
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
         if not model: return None, ["❌ Model not loaded"]
 
-        # 1. Start with Random Noise
+        # 1. Noise
         x = torch.randint(0, vocab, (1, 100)).to(dev)
         props = torch.tensor(vector, dtype=torch.float32).to(dev)
         
-        # 2. Loop fewer times (15 instead of 30)
+        # 2. Loop
         for t in reversed(range(steps)):
             time = torch.tensor([t]).float().to(dev)
             with torch.no_grad(): 
                 logits = model(x, time, props)
             
-            # 3. Increase randomness (Temp 1.5 makes it creative)
-            # Higher temp = More wild/novel molecules
-            # Lower temp = Safe/Known molecules
+            # Chaos Mode (Temp 1.5)
             probs = torch.softmax(logits / temp, dim=-1)
             
             if torch.isnan(probs).any(): return None, ["❌ NaN Detected"]
             
-            # Sample from the distribution
+            # Sample
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
-            
-            # Update sequence
             mask = torch.rand_like(x.float()) > (t/steps)
             x = torch.where(mask, pred, x)
             
+        # 3. Decode
         tokens = [ml_context['itos'].get(i, "") for i in x[0].cpu().tolist()]
         valid = [t for t in tokens if t not in ["[nop]", "[MASK]"]]
         try: 
-            smiles = sf.decoder("".join(valid))
-            return smiles, [f"✅ Decoded (Steps={steps}, T={temp})"]
+            return sf.decoder("".join(valid)), [f"✅ Decoded (Steps={steps})"]
         except: 
             return None, ["⚠️ Decoder Failed"]
             
-    except Exception as e: return None, [f"❌ Crash: {e}"]
+    except Exception as e: 
+        return None, [f"❌ Crash: {e}"]
 
 @app.post("/generate")
 async def generate(req: DesignRequest):
@@ -170,15 +168,11 @@ async def generate(req: DesignRequest):
     final_vector = np.zeros((1, len(props_cols)))
     use_noise = False
     
-    # Try Scaler
+    # Try Scaler (Skip if unsafe)
     try:
         scaler = ml_context['scaler']
-        # Map basic props (mw, logp) if available
-        raw = [getattr(req, 'mw', 0) or 0, getattr(req, 'logp', 0) or 0] + [0]*10 # Simplified for safety
         if scaler:
-            # We bypass full scaling to be safe against version mismatch
-            # Instead, we rely on the flag primarily
-            trace.append("⚠️ Scaler skipped for safety (Version Mismatch Prevention)")
+            trace.append("⚠️ Scaler skipped for safety")
             use_noise = True
         else: use_noise = True
     except: use_noise = True
@@ -195,7 +189,7 @@ async def generate(req: DesignRequest):
             trace.append(f"✅ Flag Set: {col}")
             break
 
-    # Generate
+    # Generate Loop (Try 5 times)
     best_smiles = "C"
     final_mol = None
     
