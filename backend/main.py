@@ -5,7 +5,7 @@ import torch.nn as nn
 import numpy as np
 import selfies as sf
 import uvicorn
-import pubchempy as pcp  # <--- NEW IMPORT
+import pubchempy as pcp 
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,11 +24,15 @@ MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
+    """Ensures the real binary model exists."""
     if os.path.exists(MODEL_PATH):
+        # Check if it's a fake LFS pointer (files < 5MB are suspicious)
         if os.path.getsize(MODEL_PATH) < 5 * 1024 * 1024: 
+            print("⚠️ Found LFS pointer. Deleting...")
             os.remove(MODEL_PATH)
+            
     if not os.path.exists(MODEL_PATH):
-        print(f"⬇️ Downloading Model...")
+        print(f"⬇️ Downloading Model from Hugging Face...")
         try:
             r = requests.get(MODEL_URL, stream=True)
             r.raise_for_status()
@@ -46,39 +50,38 @@ ml_context = {
 }
 
 # ==========================================
-# 2. PUBCHEM VERIFICATION ENGINE
+# 2. NOVELTY & VALIDATION ENGINE
 # ==========================================
+COMMON_SMILES = {
+    "C": "Methane", "CC": "Ethane", "CCO": "Ethanol", "c1ccccc1": "Benzene",
+    "CC(=O)Oc1ccccc1C(=O)O": "Aspirin", "CN1C=NC2=C1C(=O)N(C(=O)N2C)C": "Caffeine",
+    "CC(=O)Nc1ccc(cc1)O": "Paracetamol", "O": "Water"
+}
+
 def check_novelty(smiles: str):
-    """
-    Queries PubChem PUG REST API to see if the molecule exists.
-    """
+    """Queries PubChem to see if the molecule exists."""
     try:
-        # 1. Normalize SMILES first
+        # 1. Normalize
         mol = Chem.MolFromSmiles(smiles)
         if not mol: return False, "Invalid Structure"
         canonical = Chem.MolToSmiles(mol, canonical=True)
 
-        # 2. Query PubChem (This takes ~1 second)
-        # We search by identity (exact match)
+        # 2. Local Check (Fast)
+        if canonical in COMMON_SMILES:
+            return False, f"Known: {COMMON_SMILES[canonical]}"
+
+        # 3. PubChem Check (Slow but Accurate)
         matches = pcp.get_compounds(canonical, namespace='smiles')
-
         if matches:
-            # Found it! It's a known compound.
-            # Try to get a common name (Synonym)
             compound = matches[0]
-            common_name = "Known Compound"
+            name = "Known Compound"
             if hasattr(compound, 'synonyms') and compound.synonyms:
-                # Pick the first synonym that looks like a name (not a CAS number)
-                common_name = compound.synonyms[0][:20] 
-            
-            return False, f"Known: {common_name}"
+                name = compound.synonyms[0][:20]
+            return False, f"Known: {name}"
         else:
-            # Empty list = Novel!
             return True, "Novel (PubChem Verified)"
-
     except Exception as e:
-        print(f"⚠️ PubChem Error: {e}")
-        # Fallback if internet fails: Assume novel to keep app running
+        print(f"⚠️ PubChem Warning: {e}")
         return True, "Novel (Offline Mode)"
 
 # ==========================================
@@ -104,7 +107,7 @@ class SelfiesDiffusion(nn.Module):
         return self.fc_out(h)
 
 # ==========================================
-# 4. LIFESPAN
+# 4. LIFESPAN (Startup)
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -144,7 +147,8 @@ class DesignRequest(BaseModel):
 class SmilesRequest(BaseModel):
     smiles: str
 
-def run_diffusion_safe(vector, steps=25, temp=1.2):
+# TUNED: Steps=30 (High Quality), Temp=1.2 (Novelty)
+def run_diffusion_safe(vector, steps=30, temp=1.2):
     try:
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
         if not model: return None, ["❌ Model not loaded"]
@@ -156,7 +160,10 @@ def run_diffusion_safe(vector, steps=25, temp=1.2):
             time = torch.tensor([t]).float().to(dev)
             with torch.no_grad(): 
                 logits = model(x, time, props)
+            
+            # Softmax with Temperature
             probs = torch.softmax(logits / temp, dim=-1)
+            
             if torch.isnan(probs).any(): return None, ["❌ NaN Detected"]
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
             mask = torch.rand_like(x.float()) > (t/steps)
@@ -182,10 +189,11 @@ async def generate(req: DesignRequest):
     if not ml_context['model']: return {"error": "Model loading..."}
     props_cols = ml_context['props_cols']
     
-    # EXPLOSIVE NOISE for Novelty
+    # 1. ORGANIC NOISE: Std=1.0 (Novel but Safe)
     final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
-    trace.append("⚡ Using EXPLOSIVE Noise Vector")
+    trace.append("⚡ Using Tuned Noise (Std=1.0)")
 
+    # 2. Domain Flag
     domain_key = f"is_{req.domain.lower()}"
     for i, col in enumerate(props_cols):
         if domain_key in col.lower():
@@ -196,18 +204,36 @@ async def generate(req: DesignRequest):
     best_smiles = "C"
     final_mol = None
     
-    for _ in range(5):
+    # 3. GENERATION LOOP
+    # Filter out Toxic Heavy Metals & Unstable Groups
+    FORBIDDEN = ["Pt", "Ir", "Au", "Hg", "As", "Se", "Pb", "U", "Cd", "Te"]
+    UNSTABLE = ["C=C=C", "P"] # Allenes & Phosphines (Optional: remove "P" if you want it)
+
+    for attempt in range(10): 
         smiles, logs = run_diffusion_safe(final_vector)
+        
         if logs and "NaN" in logs[0]:
              final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
              continue
+             
         if smiles:
+            # 🛑 SAFETY CHECKS
+            if any(metal in smiles for metal in FORBIDDEN):
+                trace.append(f"⚠️ Rejected Attempt {attempt+1}: Toxic Metal")
+                continue
+            
+            # Uncomment below to force higher QED (More drug-like, less novel)
+            # if any(grp in smiles for grp in UNSTABLE):
+            #    trace.append(f"⚠️ Rejected Attempt {attempt+1}: Unstable Group")
+            #    continue
+
             mol = Chem.MolFromSmiles(smiles)
             if mol:
                 best_smiles = smiles
                 final_mol = mol
                 break
     
+    # 4. PACK RESPONSE
     props = {"valid": False}
     mol_block = ""
     if final_mol:
@@ -216,7 +242,7 @@ async def generate(req: DesignRequest):
             AllChem.EmbedMolecule(mol_3d, AllChem.ETKDG())
             mol_block = Chem.MolToMolBlock(mol_3d)
             
-            # 🔍 PUBCHEM CHECK
+            # Check Novelty
             is_novel, status = check_novelty(best_smiles)
             trace.append(f"🔍 Database Scan: {status}")
             
@@ -244,7 +270,6 @@ async def analyze(req: SmilesRequest):
     mol = Chem.MolFromSmiles(req.smiles)
     if not mol: return {"error": "Invalid SMILES"}
     
-    # 🔍 PUBCHEM CHECK
     is_novel, status = check_novelty(req.smiles)
     sas_score = round(3 + (Descriptors.MolWt(mol) / 100), 1)
 
