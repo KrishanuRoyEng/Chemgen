@@ -6,7 +6,7 @@ import numpy as np
 import selfies as sf
 import uvicorn
 import sys
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -22,7 +22,7 @@ MODEL_FILENAME = "universal_diffusion_model.pth"
 MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 
 # 🚨 REPLACE WITH YOUR EXACT HUGGING FACE LINK 🚨
-MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
+MODEL_URL = "https://huggingface.co/krish-chem/chemgen/resolve/main/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
     """Ensures the real binary model exists."""
@@ -119,8 +119,11 @@ class DesignRequest(BaseModel):
     mw: Optional[float] = None
     logp: Optional[float] = None
 
+class SmilesRequest(BaseModel):
+    smiles: str
+
 # HELPER: Safe Diffusion (Updated for Speed & Chaos)
-def run_diffusion_safe(vector, steps=15, temp=1.5):
+def run_diffusion_safe(vector, steps=10, temp=1.5):
     try:
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
         if not model: return None, ["❌ Model not loaded"]
@@ -225,6 +228,23 @@ async def generate(req: DesignRequest):
         "mol_block": mol_block,
         "properties": props,
         "trace": trace
+    }
+
+@app.post("/analyze")
+async def analyze(req: SmilesRequest):
+    mol = Chem.MolFromSmiles(req.smiles)
+    if not mol: return {"error": "Invalid SMILES"}
+    
+    return {
+        "mw": round(Descriptors.MolWt(mol), 2),
+        "logp": round(Descriptors.MolLogP(mol), 2),
+        "tpsa": round(Descriptors.TPSA(mol), 2),
+        "hbd": Lipinski.NumHDonors(mol),
+        "hba": Lipinski.NumHAcceptors(mol),
+        "rot": Descriptors.NumRotatableBonds(mol),
+        "rings": Lipinski.RingCount(mol),
+        "qed": round(QED.qed(mol), 3),
+        "valid": True
     }
 
 if __name__ == "__main__":
