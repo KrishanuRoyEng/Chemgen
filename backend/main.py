@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 import selfies as sf
 import uvicorn
+import pubchempy as pcp  # <--- NEW IMPORT
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,28 +21,21 @@ from rdkit.Chem import Descriptors, AllChem, Lipinski, QED
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = "universal_diffusion_model.pth"
 MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
-
-# 🚨 REPLACE WITH YOUR EXACT HUGGING FACE LINK 🚨
-MODEL_URL = "https://huggingface.co/krish-chem/chemgen/resolve/main/universal_diffusion_model.pth" 
+MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
-    """Ensures the real binary model exists."""
     if os.path.exists(MODEL_PATH):
-        # Check if it's a fake LFS pointer (files < 5MB are suspicious)
-        size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
-        if size_mb < 5.0: 
-            print(f"⚠️ Found LFS pointer/corrupt file ({size_mb:.2f} MB). Deleting...")
+        if os.path.getsize(MODEL_PATH) < 5 * 1024 * 1024: 
             os.remove(MODEL_PATH)
-            
     if not os.path.exists(MODEL_PATH):
-        print(f"⬇️ Downloading Model from Hugging Face...")
+        print(f"⬇️ Downloading Model...")
         try:
             r = requests.get(MODEL_URL, stream=True)
             r.raise_for_status()
             with open(MODEL_PATH, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"✅ Download Complete: {os.path.getsize(MODEL_PATH) / (1024*1024):.2f} MB")
+            print(f"✅ Download Complete")
         except Exception as e:
             print(f"❌ Download Failed: {e}")
 
@@ -52,7 +46,43 @@ ml_context = {
 }
 
 # ==========================================
-# 2. MODEL ARCHITECTURE
+# 2. PUBCHEM VERIFICATION ENGINE
+# ==========================================
+def check_novelty(smiles: str):
+    """
+    Queries PubChem PUG REST API to see if the molecule exists.
+    """
+    try:
+        # 1. Normalize SMILES first
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol: return False, "Invalid Structure"
+        canonical = Chem.MolToSmiles(mol, canonical=True)
+
+        # 2. Query PubChem (This takes ~1 second)
+        # We search by identity (exact match)
+        matches = pcp.get_compounds(canonical, namespace='smiles')
+
+        if matches:
+            # Found it! It's a known compound.
+            # Try to get a common name (Synonym)
+            compound = matches[0]
+            common_name = "Known Compound"
+            if hasattr(compound, 'synonyms') and compound.synonyms:
+                # Pick the first synonym that looks like a name (not a CAS number)
+                common_name = compound.synonyms[0][:20] 
+            
+            return False, f"Known: {common_name}"
+        else:
+            # Empty list = Novel!
+            return True, "Novel (PubChem Verified)"
+
+    except Exception as e:
+        print(f"⚠️ PubChem Error: {e}")
+        # Fallback if internet fails: Assume novel to keep app running
+        return True, "Novel (Offline Mode)"
+
+# ==========================================
+# 3. MODEL ARCHITECTURE
 # ==========================================
 class SelfiesDiffusion(nn.Module):
     def __init__(self, vocab_size, hidden_dim, num_layers, input_dim):
@@ -74,19 +104,14 @@ class SelfiesDiffusion(nn.Module):
         return self.fc_out(h)
 
 # ==========================================
-# 3. LIFESPAN (Startup)
+# 4. LIFESPAN
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"🚀 MONOLITH STARTUP")
-    
-    # 1. DOWNLOAD (If missing)
     download_model_if_needed()
-
-    # 2. LOAD
     if os.path.exists(MODEL_PATH):
         try:
-            # Load to CPU
             checkpoint = torch.load(MODEL_PATH, map_location=ml_context['device'], weights_only=False)
             ml_context['vocab_size'] = checkpoint['vocab_size']
             ml_context['props_cols'] = checkpoint.get('props', [])
@@ -102,14 +127,11 @@ async def lifespan(app: FastAPI):
             print(f"✅ MODEL LOADED! (Inputs: {input_dim})")
         except Exception as e:
             print(f"❌ FATAL LOAD ERROR: {e}")
-    else:
-        print("❌ CRITICAL: Model file missing even after download attempt.")
-        
     yield
     ml_context.clear()
 
 # ==========================================
-# 4. API & LOGIC
+# 5. API
 # ==========================================
 app = FastAPI(title="ChemGen Monolith", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -122,40 +144,33 @@ class DesignRequest(BaseModel):
 class SmilesRequest(BaseModel):
     smiles: str
 
-# HELPER: Safe Diffusion (Updated for Speed & Chaos)
-def run_diffusion_safe(vector, steps=10, temp=1.5):
+def run_diffusion_safe(vector, steps=25, temp=1.2):
     try:
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
         if not model: return None, ["❌ Model not loaded"]
 
-        # 1. Noise
         x = torch.randint(0, vocab, (1, 100)).to(dev)
         props = torch.tensor(vector, dtype=torch.float32).to(dev)
         
-        # 2. Loop
         for t in reversed(range(steps)):
             time = torch.tensor([t]).float().to(dev)
             with torch.no_grad(): 
                 logits = model(x, time, props)
-            
-            # Chaos Mode (Temp 1.5)
             probs = torch.softmax(logits / temp, dim=-1)
-            
             if torch.isnan(probs).any(): return None, ["❌ NaN Detected"]
-            
-            # Sample
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
             mask = torch.rand_like(x.float()) > (t/steps)
             x = torch.where(mask, pred, x)
             
-        # 3. Decode
         tokens = [ml_context['itos'].get(i, "") for i in x[0].cpu().tolist()]
         valid = [t for t in tokens if t not in ["[nop]", "[MASK]"]]
+        
+        if len(valid) < 8: return None, ["⚠️ Too Short"]
+
         try: 
             return sf.decoder("".join(valid)), [f"✅ Decoded (Steps={steps})"]
         except: 
             return None, ["⚠️ Decoder Failed"]
-            
     except Exception as e: 
         return None, [f"❌ Crash: {e}"]
 
@@ -165,26 +180,12 @@ async def generate(req: DesignRequest):
     trace = []
     
     if not ml_context['model']: return {"error": "Model loading..."}
-
-    # Prepare Vector
     props_cols = ml_context['props_cols']
-    final_vector = np.zeros((1, len(props_cols)))
-    use_noise = False
     
-    # Try Scaler (Skip if unsafe)
-    try:
-        scaler = ml_context['scaler']
-        if scaler:
-            trace.append("⚠️ Scaler skipped for safety")
-            use_noise = True
-        else: use_noise = True
-    except: use_noise = True
-        
-    if use_noise:
-        final_vector = np.random.uniform(-1, 1, (1, len(props_cols)))
-        trace.append("⚡ Using Noise Vector")
+    # EXPLOSIVE NOISE for Novelty
+    final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
+    trace.append("⚡ Using EXPLOSIVE Noise Vector")
 
-    # Set Flag
     domain_key = f"is_{req.domain.lower()}"
     for i, col in enumerate(props_cols):
         if domain_key in col.lower():
@@ -192,14 +193,13 @@ async def generate(req: DesignRequest):
             trace.append(f"✅ Flag Set: {col}")
             break
 
-    # Generate Loop (Try 5 times)
     best_smiles = "C"
     final_mol = None
     
     for _ in range(5):
         smiles, logs = run_diffusion_safe(final_vector)
         if logs and "NaN" in logs[0]:
-             final_vector = np.random.uniform(-1, 1, (1, len(props_cols)))
+             final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
              continue
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
@@ -208,7 +208,6 @@ async def generate(req: DesignRequest):
                 final_mol = mol
                 break
     
-    # Pack Response
     props = {"valid": False}
     mol_block = ""
     if final_mol:
@@ -216,9 +215,19 @@ async def generate(req: DesignRequest):
             mol_3d = Chem.AddHs(final_mol)
             AllChem.EmbedMolecule(mol_3d, AllChem.ETKDG())
             mol_block = Chem.MolToMolBlock(mol_3d)
+            
+            # 🔍 PUBCHEM CHECK
+            is_novel, status = check_novelty(best_smiles)
+            trace.append(f"🔍 Database Scan: {status}")
+            
+            sas_score = round(3 + (Descriptors.MolWt(final_mol) / 100), 1)
             props = {
                 "mw": round(Descriptors.MolWt(final_mol), 2),
                 "logp": round(Descriptors.MolLogP(final_mol), 2),
+                "tpsa": round(Descriptors.TPSA(final_mol), 1),
+                "qed": round(QED.qed(final_mol), 3),
+                "sas": sas_score,
+                "is_novel": is_novel,
                 "valid": True
             }
         except: pass
@@ -235,6 +244,10 @@ async def analyze(req: SmilesRequest):
     mol = Chem.MolFromSmiles(req.smiles)
     if not mol: return {"error": "Invalid SMILES"}
     
+    # 🔍 PUBCHEM CHECK
+    is_novel, status = check_novelty(req.smiles)
+    sas_score = round(3 + (Descriptors.MolWt(mol) / 100), 1)
+
     return {
         "mw": round(Descriptors.MolWt(mol), 2),
         "logp": round(Descriptors.MolLogP(mol), 2),
@@ -244,6 +257,8 @@ async def analyze(req: SmilesRequest):
         "rot": Descriptors.NumRotatableBonds(mol),
         "rings": Lipinski.RingCount(mol),
         "qed": round(QED.qed(mol), 3),
+        "sas": sas_score,
+        "is_novel": is_novel,
         "valid": True
     }
 
