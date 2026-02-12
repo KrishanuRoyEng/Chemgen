@@ -2,6 +2,8 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { AlertTriangle, Fingerprint, Activity, ShieldCheck, Microscope } from 'lucide-react';
 import clsx from 'clsx';
+import Tooltip from './Tooltip';
+import { PROPERTY_TOOLTIPS } from '../constants/tooltips';
 
 const AnalysisHUD = ({ result, loading }) => {
 
@@ -66,7 +68,9 @@ const AnalysisHUD = ({ result, loading }) => {
             {/* Synthesizability Gauge */}
             <div className="bg-white/5 p-3 rounded-lg">
                 <div className="flex justify-between items-end mb-2">
-                    <span className="text-[10px] font-mono text-gray-400">SYNTHESIZABILITY (SAS)</span>
+                    <Tooltip content={PROPERTY_TOOLTIPS.sas}>
+                        <span className="text-[10px] font-mono text-gray-400 cursor-help border-b border-dotted border-gray-600 hover:text-white transition-colors">SYNTHESIZABILITY (SAS)</span>
+                    </Tooltip>
                     <span className={clsx("text-sm font-bold font-mono", sasColor)}>{sas} / 10</span>
                 </div>
                 <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
@@ -86,15 +90,17 @@ const AnalysisHUD = ({ result, loading }) => {
 
             {/* 12-Prop Results Grid */}
             <div className="grid grid-cols-2 gap-2">
-                <PropBox label="WEIGHT" value={`${props.mw?.toFixed(1)} Da`} color="text-neon-blue" />
-                <PropBox label="LOG P" value={props.logp?.toFixed(2)} color="text-neon-purple" />
-                <PropBox label="TPSA" value={`${props.tpsa?.toFixed(1)} Å²`} color="text-white" />
-                <PropBox label="QUALITY (QED)" value={props.qed?.toFixed(3)} color="text-neon-green" />
+                <PropBox label="WEIGHT" value={`${props.mw?.toFixed(1)} Da`} color="text-neon-blue" tooltip={PROPERTY_TOOLTIPS.mw} />
+                <PropBox label="LOG P" value={props.logp?.toFixed(2)} color="text-neon-purple" tooltip={PROPERTY_TOOLTIPS.logp} />
+                <PropBox label="TPSA" value={`${props.tpsa?.toFixed(1)} Å²`} color="text-white" tooltip={PROPERTY_TOOLTIPS.tpsa} />
+                <PropBox label="QUALITY (QED)" value={props.qed?.toFixed(3)} color="text-neon-green" tooltip={PROPERTY_TOOLTIPS.qed} />
 
                 {/* Domain Specific Result (Only shows if present) */}
                 {props.toxicity !== undefined && (
                     <div className="col-span-2 bg-white/5 p-2 rounded flex justify-between items-center border border-white/5">
-                        <span className="text-[9px] text-gray-500 font-mono">NEURAL TOXICITY SCORE</span>
+                        <Tooltip content={PROPERTY_TOOLTIPS.toxicity}>
+                            <span className="text-[9px] text-gray-500 font-mono cursor-help border-b border-dotted border-gray-600 hover:text-white transition-colors">NEURAL TOXICITY SCORE</span>
+                        </Tooltip>
                         <span className={clsx("font-mono text-xs font-bold", props.toxicity > 0.5 ? "text-danger-red" : "text-neon-green")}>
                             {(props.toxicity * 100).toFixed(1)}%
                         </span>
@@ -127,9 +133,11 @@ const AnalysisHUD = ({ result, loading }) => {
 };
 
 // Reusable Sub-component for property cells
-const PropBox = ({ label, value, color }) => (
+const PropBox = ({ label, value, color, tooltip }) => (
     <div className="bg-white/5 p-2 rounded border border-white/5 hover:bg-white/10 transition-colors">
-        <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter mb-0.5">{label}</div>
+        <Tooltip content={tooltip}>
+            <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter mb-0.5 cursor-help border-b border-dotted border-gray-600 hover:text-white w-max transition-colors">{label}</div>
+        </Tooltip>
         <div className={clsx("font-mono text-xs font-bold truncate", color)}>{value}</div>
     </div>
 );

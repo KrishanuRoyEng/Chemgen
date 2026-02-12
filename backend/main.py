@@ -24,65 +24,49 @@ MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
 
 def download_model_if_needed():
-    """Ensures the real binary model exists."""
     if os.path.exists(MODEL_PATH):
-        # Check if it's a fake LFS pointer (files < 5MB are suspicious)
         if os.path.getsize(MODEL_PATH) < 5 * 1024 * 1024: 
-            print("⚠️ Found LFS pointer. Deleting...")
             os.remove(MODEL_PATH)
             
     if not os.path.exists(MODEL_PATH):
-        print(f"⬇️ Downloading Model from Hugging Face...")
+        print(f"⬇️ Downloading Model...")
         try:
             r = requests.get(MODEL_URL, stream=True)
-            r.raise_for_status()
             with open(MODEL_PATH, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
             print(f"✅ Download Complete")
-        except Exception as e:
-            print(f"❌ Download Failed: {e}")
+        except Exception: pass
 
-# Global Memory
+# Global Memory - AUTO-DETECT GPU
 ml_context = {
     "model": None, "scaler": None, "props_cols": [], 
-    "vocab_size": 0, "itos": {}, "device": torch.device("cpu")
+    "vocab_size": 0, "itos": {}, 
+    "device": torch.device("cuda" if torch.cuda.is_available() else "cpu") # <--- GPU ENABLED
 }
 
 # ==========================================
-# 2. NOVELTY & VALIDATION ENGINE
+# 2. NOVELTY & VALIDATION
 # ==========================================
 COMMON_SMILES = {
     "C": "Methane", "CC": "Ethane", "CCO": "Ethanol", "c1ccccc1": "Benzene",
-    "CC(=O)Oc1ccccc1C(=O)O": "Aspirin", "CN1C=NC2=C1C(=O)N(C(=O)N2C)C": "Caffeine",
-    "CC(=O)Nc1ccc(cc1)O": "Paracetamol", "O": "Water"
+    "CC(=O)Oc1ccccc1C(=O)O": "Aspirin"
 }
 
 def check_novelty(smiles: str):
-    """Queries PubChem to see if the molecule exists."""
     try:
-        # 1. Normalize
         mol = Chem.MolFromSmiles(smiles)
-        if not mol: return False, "Invalid Structure"
+        if not mol: return False, "Invalid"
         canonical = Chem.MolToSmiles(mol, canonical=True)
+        if canonical in COMMON_SMILES: return False, "Known Compound"
 
-        # 2. Local Check (Fast)
-        if canonical in COMMON_SMILES:
-            return False, f"Known: {COMMON_SMILES[canonical]}"
-
-        # 3. PubChem Check (Slow but Accurate)
         matches = pcp.get_compounds(canonical, namespace='smiles')
         if matches:
-            compound = matches[0]
-            name = "Known Compound"
-            if hasattr(compound, 'synonyms') and compound.synonyms:
-                name = compound.synonyms[0][:20]
-            return False, f"Known: {name}"
+            return False, "Known (PubChem)"
         else:
             return True, "Novel (PubChem Verified)"
-    except Exception as e:
-        print(f"⚠️ PubChem Warning: {e}")
-        return True, "Novel (Offline Mode)"
+    except:
+        return True, "Novel (Offline)"
 
 # ==========================================
 # 3. MODEL ARCHITECTURE
@@ -107,12 +91,12 @@ class SelfiesDiffusion(nn.Module):
         return self.fc_out(h)
 
 # ==========================================
-# 4. LIFESPAN (Startup)
+# 4. LIFESPAN
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"🚀 MONOLITH STARTUP")
     download_model_if_needed()
+    print(f"🚀 MONOLITH STARTUP on {ml_context['device']}")
     if os.path.exists(MODEL_PATH):
         try:
             checkpoint = torch.load(MODEL_PATH, map_location=ml_context['device'], weights_only=False)
@@ -127,27 +111,24 @@ async def lifespan(app: FastAPI):
             model.to(ml_context['device'])
             model.eval()
             ml_context['model'] = model
-            print(f"✅ MODEL LOADED! (Inputs: {input_dim})")
+            print(f"✅ MODEL LOADED (GPU: {torch.cuda.is_available()})")
         except Exception as e:
-            print(f"❌ FATAL LOAD ERROR: {e}")
+            print(f"❌ LOAD ERROR: {e}")
     yield
     ml_context.clear()
 
 # ==========================================
-# 5. API
+# 5. API & LOGIC
 # ==========================================
-app = FastAPI(title="ChemGen Monolith", lifespan=lifespan)
+app = FastAPI(title="ChemGen", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 class DesignRequest(BaseModel):
     domain: str
-    mw: Optional[float] = None
-    logp: Optional[float] = None
 
 class SmilesRequest(BaseModel):
     smiles: str
 
-# TUNED: Steps=30 (High Quality), Temp=1.2 (Novelty)
 def run_diffusion_safe(vector, steps=30, temp=1.2):
     try:
         model, dev, vocab = ml_context['model'], ml_context['device'], ml_context['vocab_size']
@@ -160,80 +141,135 @@ def run_diffusion_safe(vector, steps=30, temp=1.2):
             time = torch.tensor([t]).float().to(dev)
             with torch.no_grad(): 
                 logits = model(x, time, props)
-            
-            # Softmax with Temperature
             probs = torch.softmax(logits / temp, dim=-1)
-            
-            if torch.isnan(probs).any(): return None, ["❌ NaN Detected"]
+            if torch.isnan(probs).any(): return None, ["NaN"]
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
             mask = torch.rand_like(x.float()) > (t/steps)
             x = torch.where(mask, pred, x)
             
         tokens = [ml_context['itos'].get(i, "") for i in x[0].cpu().tolist()]
         valid = [t for t in tokens if t not in ["[nop]", "[MASK]"]]
+        if len(valid) < 8: return None, ["Too Short"]
+        return sf.decoder("".join(valid)), ["Success"]
+    except: return None, ["Crash"]
+
+# ---------------------------------------------------------
+# 🧪 FINAL STABILITY CHECK (Fixes Sulfur Error)
+# ---------------------------------------------------------
+def is_chemically_stable(mol):
+    try:
+        Chem.SanitizeMol(mol)
         
-        if len(valid) < 8: return None, ["⚠️ Too Short"]
+        # 1. ATOM CHECKER
+        for atom in mol.GetAtoms():
+            sym = atom.GetSymbol()
+            chg = atom.GetFormalCharge()
+            deg = atom.GetDegree() # Number of neighbors
+            val = atom.GetTotalValence() # Total bonds
+            
+            # 🛑 SULFUR/OXYGEN RULES
+            if sym in ['O', 'S']:
+                if chg == -1 and deg > 1: return False # No S- Bridges
+                if chg == 0 and val not in [2, 4, 6]: return False
+                if chg == 1 and val != 3: return False
 
-        try: 
-            return sf.decoder("".join(valid)), [f"✅ Decoded (Steps={steps})"]
-        except: 
-            return None, ["⚠️ Decoder Failed"]
-    except Exception as e: 
-        return None, [f"❌ Crash: {e}"]
+            # 🛑 NITROGEN RULES
+            if sym == 'N':
+                if chg == 0 and val != 3: return False
+                if chg == 1 and val != 4: return False
+                if val > 4: return False 
 
+            # 🛑 CARBON RULES
+            if sym == 'C':
+                if chg == 0 and val != 4: return False
+
+        # 2. BOND CHECKER (No S=S or S=N)
+        for bond in mol.GetBonds():
+            a1, a2 = bond.GetBeginAtom(), bond.GetEndAtom()
+            sym1, sym2 = a1.GetSymbol(), a2.GetSymbol()
+            
+            # Repulsion Check (+ touching +)
+            if a1.GetFormalCharge() * a2.GetFormalCharge() > 0: return False
+            
+            # Bad Double Bonds (S=S, S=N, P=P)
+            if bond.GetBondTypeAsDouble() > 1.0:
+                if sym1 in ['S','N','P'] and sym2 in ['S','N','P']:
+                    if sym1 == 'N' and sym2 == 'N': continue # Allow N=N
+                    if sym1 == 'O' or sym2 == 'O': continue # Allow S=O, P=O
+                    return False 
+
+        return True
+    except: return False
+
+# ---------------------------------------------------------
+# 🛡️ GENERATOR (Ring Enforcer + Fail-Safe)
+# ---------------------------------------------------------
 @app.post("/generate")
 async def generate(req: DesignRequest):
-    print(f"🚀 API HIT: /generate for {req.domain}")
+    print(f"🚀 API HIT: {req.domain}")
     trace = []
     
-    if not ml_context['model']: return {"error": "Model loading..."}
+    if not ml_context['model']: return {"error": "Loading..."}
     props_cols = ml_context['props_cols']
+    base_vector = np.random.normal(0, 1.2, (1, len(props_cols)))
     
-    # 1. ORGANIC NOISE: Std=1.0 (Novel but Safe)
-    final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
-    trace.append("⚡ Using Tuned Noise (Std=1.0)")
-
-    # 2. Domain Flag
     domain_key = f"is_{req.domain.lower()}"
     for i, col in enumerate(props_cols):
         if domain_key in col.lower():
-            final_vector[0, i] = 5.0
-            trace.append(f"✅ Flag Set: {col}")
+            base_vector[0, i] = 5.0
             break
 
     best_smiles = "C"
     final_mol = None
-    
-    # 3. GENERATION LOOP
-    # Filter out Toxic Heavy Metals & Unstable Groups
-    FORBIDDEN = ["Pt", "Ir", "Au", "Hg", "As", "Se", "Pb", "U", "Cd", "Te"]
-    UNSTABLE = ["C=C=C", "P"] # Allenes & Phosphines (Optional: remove "P" if you want it)
+    FORBIDDEN = ["Se", "Si", "Te", "As", "B", "Pb", "Sn", "Hg", "Cd"] 
+    ALLOWED_ATOMS = {'C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'H'}
 
-    for attempt in range(10): 
-        smiles, logs = run_diffusion_safe(final_vector)
+    # Try 50 times. Logic: Creative -> Safe.
+    for attempt in range(50):
+        # Adaptive Noise
+        if attempt < 15:
+            temp = 1.5
+            vec = base_vector + np.random.normal(0, 0.5, base_vector.shape)
+        else:
+            temp = 1.0 # Panic Mode
+            vec = np.random.normal(0, 0.8, (1, len(props_cols)))
+
+        smiles, logs = run_diffusion_safe(vec, steps=30, temp=temp)
+        if not smiles: continue
         
-        if logs and "NaN" in logs[0]:
-             final_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
-             continue
-             
-        if smiles:
-            # 🛑 SAFETY CHECKS
-            if any(metal in smiles for metal in FORBIDDEN):
-                trace.append(f"⚠️ Rejected Attempt {attempt+1}: Toxic Metal")
-                continue
-            
-            # Uncomment below to force higher QED (More drug-like, less novel)
-            # if any(grp in smiles for grp in UNSTABLE):
-            #    trace.append(f"⚠️ Rejected Attempt {attempt+1}: Unstable Group")
-            #    continue
+        # 1. TEXT FILTER
+        if any(bad in smiles for bad in FORBIDDEN): continue
 
-            mol = Chem.MolFromSmiles(smiles)
-            if mol:
-                best_smiles = smiles
-                final_mol = mol
-                break
-    
-    # 4. PACK RESPONSE
+        # 2. RDKIT PARSE
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol: continue
+
+        try:
+            # 3. ATOMIC FILTER
+            is_organic = True
+            for atom in mol.GetAtoms():
+                if atom.GetSymbol() not in ALLOWED_ATOMS:
+                    is_organic = False; break
+            if not is_organic: continue
+
+            # 4. PHYSICS FILTER
+            if not is_chemically_stable(mol): continue
+            
+            # 5. COMPLEXITY FILTER (RINGS REQUIRED!)
+            min_atoms = 12 if attempt < 15 else 5
+            if mol.GetNumAtoms() < min_atoms: continue
+            
+            # 🛑 FORCE RINGS IN CREATIVE MODE 🛑
+            # If we are in the first 15 tries, reject linear worms.
+            if attempt < 15 and Lipinski.RingCount(mol) == 0:
+                continue
+
+            best_smiles = smiles
+            final_mol = mol
+            trace.append(f"🎉 Success: Attempt {attempt}")
+            break
+        except: continue
+
     props = {"valid": False}
     mol_block = ""
     if final_mol:
@@ -241,46 +277,35 @@ async def generate(req: DesignRequest):
             mol_3d = Chem.AddHs(final_mol)
             AllChem.EmbedMolecule(mol_3d, AllChem.ETKDG())
             mol_block = Chem.MolToMolBlock(mol_3d)
-            
-            # Check Novelty
             is_novel, status = check_novelty(best_smiles)
-            trace.append(f"🔍 Database Scan: {status}")
+            trace.append(f"Status: {status}")
             
-            sas_score = round(3 + (Descriptors.MolWt(final_mol) / 100), 1)
             props = {
                 "mw": round(Descriptors.MolWt(final_mol), 2),
                 "logp": round(Descriptors.MolLogP(final_mol), 2),
                 "tpsa": round(Descriptors.TPSA(final_mol), 1),
                 "qed": round(QED.qed(final_mol), 3),
-                "sas": sas_score,
+                "sas": round(3 + (Descriptors.MolWt(final_mol)/100), 1),
                 "is_novel": is_novel,
                 "valid": True
             }
         except: pass
 
-    return {
-        "smiles": best_smiles,
-        "mol_block": mol_block,
-        "properties": props,
-        "trace": trace
-    }
+    return {"smiles": best_smiles, "mol_block": mol_block, "properties": props, "trace": trace}
 
 @app.post("/analyze")
 async def analyze(req: SmilesRequest):
     mol = Chem.MolFromSmiles(req.smiles)
-    if not mol: return {"error": "Invalid SMILES"}
-    
+    if not mol: return {"error": "Invalid"}
     is_novel, status = check_novelty(req.smiles)
+    
+    # Updated to match generate props
     sas_score = round(3 + (Descriptors.MolWt(mol) / 100), 1)
-
+    
     return {
         "mw": round(Descriptors.MolWt(mol), 2),
         "logp": round(Descriptors.MolLogP(mol), 2),
         "tpsa": round(Descriptors.TPSA(mol), 2),
-        "hbd": Lipinski.NumHDonors(mol),
-        "hba": Lipinski.NumHAcceptors(mol),
-        "rot": Descriptors.NumRotatableBonds(mol),
-        "rings": Lipinski.RingCount(mol),
         "qed": round(QED.qed(mol), 3),
         "sas": sas_score,
         "is_novel": is_novel,

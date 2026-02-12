@@ -26,7 +26,7 @@ function App() {
     const [affinity, setAffinity] = useState(7.0);
 
     // 4. MULTI-SEEDING & SEARCH
-    const [loading, setLoading] = useState(false);
+    const [processStatus, setProcessStatus] = useState('IDLE'); // 'IDLE' | 'SEEDING' | 'SEEDED' | 'SYNTHESIZING' | 'COMPLETE'
     const [result, setResult] = useState(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [primaryLead, setPrimaryLead] = useState(0);
@@ -34,7 +34,7 @@ function App() {
     // --- MATH: WEIGHTED INTERPOLATION ---
     const handleReferenceSearch = async () => {
         if (!searchQuery) return;
-        setLoading(true);
+        setProcessStatus('SEEDING');
 
         const names = searchQuery.split(',').map(n => n.trim()).filter(n => n !== "");
 
@@ -88,16 +88,20 @@ function App() {
             setRot(Math.round(calculateWeighted('rot')));
             setQed(parseFloat(calculateWeighted('qed').toFixed(3)));
 
-            setLoading(false);
+            // Simulate a small delay for the "Seeding" visual effect to finish
+            setTimeout(() => {
+                setProcessStatus('SEEDED');
+            }, 800);
+
         } catch (e) {
             console.error(e);
             alert("Lead Seeding Failed. Ensure names are correct.");
-            setLoading(false);
+            setProcessStatus('IDLE');
         }
     };
 
     const handleGenerate = async () => {
-        setLoading(true);
+        setProcessStatus('SYNTHESIZING');
         setResult(null);
         try {
             const payload = {
@@ -126,12 +130,12 @@ function App() {
 
             setTimeout(() => {
                 setResult(data);
-                setLoading(false);
+                setProcessStatus('COMPLETE');
             }, 1500);
         } catch (e) {
             console.error(e);
             alert("Synthesis Error: Connection reset by peer.");
-            setLoading(false);
+            setProcessStatus('IDLE');
         }
     };
 
@@ -172,13 +176,13 @@ function App() {
                         primaryLead={primaryLead} setPrimaryLead={setPrimaryLead} // For Bias Selection
                         onReferenceSearch={handleReferenceSearch}
                         onGenerate={handleGenerate}
-                        loading={loading}
+                        processStatus={processStatus}
                     />
                 </div>
 
                 {/* 2. CENTER: VISUALIZER & COMPARISON */}
                 <div className="lg:col-span-5 flex flex-col justify-start gap-4">
-                    <HolographicBox loading={loading} smiles={result?.smiles} result={result} />
+                    <HolographicBox processStatus={processStatus} smiles={result?.smiles} result={result} />
 
                     {/* Neural Convergence Report (Comparison Table) */}
                     {result && (
@@ -190,14 +194,14 @@ function App() {
 
                     <div className="mt-2 text-center">
                         <span className="text-gray-600 font-mono text-[10px] tracking-widest uppercase">
-                            {loading ? "Sampling Latent Space..." : result ? "Property Match Confirmed" : "Awaiting Seeding Input"}
+                            {processStatus === 'SYNTHESIZING' ? "Sampling Latent Space..." : result ? "Property Match Confirmed" : "Awaiting Seeding Input"}
                         </span>
                     </div>
                 </div>
 
                 {/* 3. RIGHT: FINAL ANALYSIS HUD */}
                 <div className="lg:col-span-3">
-                    <AnalysisHUD result={result} loading={loading} />
+                    <AnalysisHUD result={result} loading={processStatus === 'SYNTHESIZING'} />
                 </div>
             </div>
         </div>
