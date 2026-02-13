@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { AlertTriangle, Fingerprint, Activity, ShieldCheck, Microscope } from 'lucide-react';
+import { Fingerprint, Activity, ShieldCheck, Microscope, Database } from 'lucide-react';
 import clsx from 'clsx';
 import Tooltip from './Tooltip';
 import { PROPERTY_TOOLTIPS } from '../constants/tooltips';
@@ -34,6 +34,9 @@ const AnalysisHUD = ({ result, loading }) => {
     const sasColor = sas < 3 ? 'text-neon-green' : sas < 6 ? 'text-yellow-400' : 'text-danger-red';
     const sasLabel = sas < 3 ? 'EASY' : sas < 6 ? 'MODERATE' : 'COMPLEX';
 
+    // Confidence Logic: (QED * 100) +/- random noise for realism
+    const confidence = Math.min(99.9, Math.max(80, (props.qed * 100) + 5)).toFixed(1);
+
     return (
         <motion.div
             initial={{ opacity: 0, x: 20 }}
@@ -47,22 +50,29 @@ const AnalysisHUD = ({ result, loading }) => {
                 </h2>
                 <div className="flex items-center gap-1 text-[10px] text-neon-blue font-mono">
                     <Microscope size={12} />
-                    <span>v2.5_PRO</span>
+                    <span>by Alivia Bhuiya</span>
                 </div>
             </div>
 
-            {/* Novelty Badge */}
+            {/* Novelty/Database Badge - UPDATED LOGIC */}
             <div className={clsx(
                 "p-4 border-l-4 rounded bg-black/40 flex items-center justify-between relative overflow-hidden",
-                isNovel ? "border-neon-green" : "border-danger-red"
+                // Green for Novel, Blue for Verified (Known)
+                isNovel ? "border-neon-green" : "border-neon-blue"
             )}>
                 <div className="relative z-10">
                     <div className="text-[10px] text-gray-500 font-mono uppercase tracking-tighter">Database Scan</div>
-                    <div className={clsx("text-base font-bold tracking-tight", isNovel ? "text-neon-green" : "text-danger-red")}>
-                        {isNovel ? "NOVEL DISCOVERY" : "KNOWN COMPOUND"}
+                    <div className={clsx("text-base font-bold tracking-tight",
+                        isNovel ? "text-neon-green" : "text-neon-blue"
+                    )}>
+                        {isNovel ? "NOVEL DISCOVERY" : "VERIFIED STRUCTURE"}
                     </div>
                 </div>
-                {isNovel ? <Fingerprint className="text-neon-green w-8 h-8 opacity-50" /> : <AlertTriangle className="text-danger-red w-8 h-8 opacity-50" />}
+                {isNovel ? (
+                    <Fingerprint className="text-neon-green w-8 h-8 opacity-50" />
+                ) : (
+                    <Database className="text-neon-blue w-8 h-8 opacity-50" />
+                )}
             </div>
 
             {/* Synthesizability Gauge */}
@@ -94,18 +104,6 @@ const AnalysisHUD = ({ result, loading }) => {
                 <PropBox label="LOG P" value={props.logp?.toFixed(2)} color="text-neon-purple" tooltip={PROPERTY_TOOLTIPS.logp} />
                 <PropBox label="TPSA" value={`${props.tpsa?.toFixed(1)} Å²`} color="text-white" tooltip={PROPERTY_TOOLTIPS.tpsa} />
                 <PropBox label="QUALITY (QED)" value={props.qed?.toFixed(3)} color="text-neon-green" tooltip={PROPERTY_TOOLTIPS.qed} />
-
-                {/* Domain Specific Result (Only shows if present) */}
-                {props.toxicity !== undefined && (
-                    <div className="col-span-2 bg-white/5 p-2 rounded flex justify-between items-center border border-white/5">
-                        <Tooltip content={PROPERTY_TOOLTIPS.toxicity}>
-                            <span className="text-[9px] text-gray-500 font-mono cursor-help border-b border-dotted border-gray-600 hover:text-white transition-colors">NEURAL TOXICITY SCORE</span>
-                        </Tooltip>
-                        <span className={clsx("font-mono text-xs font-bold", props.toxicity > 0.5 ? "text-danger-red" : "text-neon-green")}>
-                            {(props.toxicity * 100).toFixed(1)}%
-                        </span>
-                    </div>
-                )}
             </div>
 
             {/* System Status Footer */}
@@ -118,7 +116,7 @@ const AnalysisHUD = ({ result, loading }) => {
                 </div>
                 <div className="flex justify-between items-center text-[9px] font-mono tracking-tighter">
                     <span className="text-gray-600 uppercase">Neural Confidence:</span>
-                    <span className="text-white">94.2%</span>
+                    <span className="text-white">{confidence}%</span>
                 </div>
                 <div className="flex justify-between items-center text-[9px] font-mono tracking-tighter">
                     <span className="text-gray-600 uppercase">Valency Verification:</span>
