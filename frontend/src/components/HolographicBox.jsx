@@ -11,17 +11,19 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
     const rotationIntervalRef = useRef(null);
     const [hoveredAtom, setHoveredAtom] = useState(null);
 
-    // Derived loading state
-    const loading = processStatus === 'SEEDING' || processStatus === 'SYNTHESIZING';
+    // 🛠️ FIX: Stricter loading logic. 
+    // If status is COMPLETE, loading is ALWAYS false, regardless of anything else.
+    const isComplete = processStatus === 'COMPLETE';
+    const isWorking = processStatus === 'SEEDING' || processStatus === 'SYNTHESIZING';
+    const loading = isWorking && !isComplete;
 
     useEffect(() => {
         if (!containerRef.current) return;
 
         // Initialize viewer
-        const viewer = $3Dmol.createViewer(containerRef.current, { backgroundColor: '#1e1e1e' }); // cyber-slate
+        const viewer = $3Dmol.createViewer(containerRef.current, { backgroundColor: '#1e1e1e' });
         viewerRef.current = viewer;
 
-        // Add Zoom/Interaction Constraints via Canvas Events
         const canvas = containerRef.current.querySelector('canvas');
         if (canvas) {
             canvas.addEventListener('wheel', handleZoom, { passive: false });
@@ -33,10 +35,8 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
         };
     }, []);
 
-    // Custom Zoom Handler to prevent "disappearing" molecule
     const handleZoom = (e) => {
-        // We allow default zoom but could clamp here if needed.
-        // For now, we rely on the standard behavior but this hook exists for future clamping.
+        // Optional zoom clamping logic here
     };
 
     // Handle Auto-Spin
@@ -44,22 +44,23 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
         if (autoSpin && viewerRef.current) {
             const interval = setInterval(() => {
                 viewerRef.current.rotate(1);
-            }, 50); // Spin 1 degree every 50ms
+            }, 50);
             rotationIntervalRef.current = interval;
         } else {
             if (rotationIntervalRef.current) clearInterval(rotationIntervalRef.current);
             rotationIntervalRef.current = null;
         }
-
         return () => {
             if (rotationIntervalRef.current) clearInterval(rotationIntervalRef.current);
         };
     }, [autoSpin]);
 
+    // 🎥 RENDER LOGIC
     useEffect(() => {
         const viewer = viewerRef.current;
         if (!viewer) return;
 
+        // 1. Clear viewer ONLY if we are genuinely loading
         if (loading) {
             viewer.clear();
             viewer.render();
@@ -67,19 +68,17 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
             return;
         }
 
-        if (result?.mol_block || smiles) {
+        // 2. Render Molecule if we have data and aren't loading
+        if ((result?.mol_block || smiles) && !loading) {
             viewer.clear();
             if (result?.mol_block) {
-                // If backend sent 3D coordinates, use them (Format: 'sdf')
                 viewer.addModel(result.mol_block, "sdf");
             } else if (smiles) {
-                // Fallback to SMILES if 3D failed (Format: 'smi')
                 viewer.addModel(smiles, "smi");
             }
-            viewer.setStyle({}, { stick: { radius: 0.2, colorscheme: 'cyanCarbon' }, sphere: { scale: 0.3 } }); // CyanCarbon looks sci-fi
+            viewer.setStyle({}, { stick: { radius: 0.2, colorscheme: 'cyanCarbon' }, sphere: { scale: 0.3 } });
             viewer.zoomTo();
 
-            // ATOM HOVER INTERACTION
             viewer.setHoverable({}, true, (atom, viewer, event, container) => {
                 if (atom && !loading) {
                     setHoveredAtom({
@@ -96,11 +95,12 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
 
             viewer.render();
         }
-    }, [loading, smiles, result]);
+    }, [loading, smiles, result]); // Dependencies ensure this runs when loading flips to false
 
     return (
         <div className="relative w-full min-h-[350px] md:h-[500px] glass-panel border-2 border-neon-blue/30 overflow-hidden flex items-center justify-center group">
-            {/* Background Grid Effect */}
+
+            {/* Background Grid */}
             <div className="absolute inset-0 bg-[linear-gradient(rgba(0,255,255,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(0,255,255,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none"></div>
 
             {/* SEEDED STATE OVERLAY */}
@@ -119,15 +119,15 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
                 )}
             </AnimatePresence>
 
-            {/* Loading State: Chaotic Sphere */}
-            <AnimatePresence mode="wait">
+            {/* 🛠️ FIX: Removed mode="wait" so molecule renders immediately behind fading spinner */}
+            <AnimatePresence>
                 {loading && (
                     <motion.div
                         key="loader"
                         initial={{ opacity: 0, scale: 0.5 }}
                         animate={{ opacity: 1, scale: 1, rotate: 360 }}
-                        exit={{ opacity: 0, scale: 1.5, filter: "blur(10px)" }}
-                        transition={{ duration: 0.5, repeat: Infinity, ease: "linear" }}
+                        exit={{ opacity: 0, scale: 1.2, filter: "blur(10px)" }}
+                        transition={{ duration: 0.5, ease: "easeInOut" }} // Smoother transition
                         className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none"
                     >
                         <div className="w-32 h-32 rounded-full border-4 border-t-neon-blue border-r-transparent border-b-neon-purple border-l-transparent animate-spin blur-sm"></div>
@@ -139,8 +139,8 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
                 )}
             </AnimatePresence>
 
-            {/* ATOM DETAILS TOOLTIP (Using Portal behavior visually but absolute here for simplicity relative to canvas) */}
-            {hoveredAtom && (
+            {/* ATOM DETAILS TOOLTIP */}
+            {hoveredAtom && !loading && (
                 <div
                     className="fixed z-50 pointer-events-none p-2 bg-black/90 border border-neon-blue rounded shadow-lg backdrop-blur text-[10px] font-mono text-white"
                     style={{ left: hoveredAtom.x + 15, top: hoveredAtom.y + 15 }}
@@ -157,7 +157,7 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
 
             {/* Flash Effect on Success */}
             <AnimatePresence>
-                {!loading && smiles && processStatus === 'COMPLETE' && (
+                {!loading && smiles && isComplete && (
                     <motion.div
                         initial={{ opacity: 1 }}
                         animate={{ opacity: 0 }}
@@ -202,7 +202,7 @@ const HolographicBox = ({ processStatus, smiles, result }) => {
             <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-neon-blue z-20"></div>
             <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-neon-blue z-20"></div>
 
-            {/* RAW DATA TERMINAL (So you can see the SMILES) */}
+            {/* RAW DATA TERMINAL */}
             {!loading && smiles && (
                 <div className="absolute bottom-0 left-0 right-0 bg-black/80 backdrop-blur border-t border-neon-blue/30 p-3 font-mono text-[10px] text-neon-blue/80 overflow-hidden whitespace-nowrap z-30">
                     <div className="flex justify-between items-center mb-1 opacity-50">

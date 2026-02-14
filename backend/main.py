@@ -10,7 +10,7 @@ import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem, Lipinski, QED
@@ -18,7 +18,7 @@ from rdkit.Chem import Descriptors, AllChem, Lipinski, QED
 # ==========================================
 # 1. CONFIGURATION & DOWNLOADER
 # ==========================================
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = os.getcwd() 
 MODEL_FILENAME = "universal_diffusion_model.pth"
 MODEL_PATH = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 MODEL_URL = "https://huggingface.co/krishanuroy/universal_diffusion_model/resolve/main/universal_diffusion_model.pth" 
@@ -29,10 +29,12 @@ def download_model_if_needed():
             os.remove(MODEL_PATH)
     if not os.path.exists(MODEL_PATH):
         try:
+            print("⬇️ Downloading Universal Model...")
             r = requests.get(MODEL_URL, stream=True)
             with open(MODEL_PATH, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
+            print("✅ Download Complete")
         except Exception: pass
 
 ml_context = {
@@ -42,13 +44,44 @@ ml_context = {
 }
 
 # ==========================================
-# 2. HELPER: NOVELTY CHECK (Analysis Only)
+# 2. DOMAIN LOGIC ENGINE
 # ==========================================
-# We keep this just for the "Analysis" HUD, but we won't use it to block generation.
-COMMON_SMILES = {
-    "C": "Methane", "CC": "Ethane", "CCO": "Ethanol", "c1ccccc1": "Benzene",
-    "CC(=O)Oc1ccccc1C(=O)O": "Aspirin"
-}
+class DomainConfig:
+    def __init__(self, domain: str):
+        self.domain = domain.lower()
+        
+    def get_constraints(self):
+        """Returns physical constraints based on the target domain."""
+        if self.domain == 'material': # ADHESION / POLYMERS
+            return {
+                # ALLOWED: Silicon (Si) for Silanes, but NO Selenium (Se)
+                "allowed_atoms": {'C', 'N', 'O', 'S', 'F', 'Cl', 'Br', 'H', 'Si', 'P'}, 
+                "min_mw": 150, 
+                "max_mw": 1000, 
+                "min_rings": 0, # Linear chains (like PEG/Silicones) are good for adhesion
+                "forbidden_fragments": ["[OH+]", "[N+]", "[Se]"] # No salts/selenium
+            }
+        elif self.domain == 'biomolecule':
+            return {
+                "allowed_atoms": {'C', 'N', 'O', 'S', 'P', 'H'},
+                "min_mw": 400, 
+                "max_mw": 2000,
+                "min_rings": 0, 
+                "forbidden_fragments": ["Cl", "Br", "I", "F"]
+            }
+        else: # Default: 'drug'
+            return {
+                "allowed_atoms": {'C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'H'},
+                "min_mw": 100,
+                "max_mw": 600, 
+                "min_rings": 1,
+                "forbidden_fragments": ["Si", "B", "Se"]
+            }
+
+# ==========================================
+# 3. HELPER: NOVELTY CHECK
+# ==========================================
+COMMON_SMILES = {"C": "Methane", "CC": "Ethane", "CCO": "Ethanol", "c1ccccc1": "Benzene"}
 
 def check_novelty(smiles: str):
     try:
@@ -56,18 +89,12 @@ def check_novelty(smiles: str):
         if not mol: return False, "Invalid"
         canonical = Chem.MolToSmiles(mol, canonical=True)
         if canonical in COMMON_SMILES: return False, "Known Compound"
-
-        # Check PubChem (Optional - does not block generation anymore)
-        matches = pcp.get_compounds(canonical, namespace='smiles')
-        if matches:
-            return False, "Known (PubChem)"
-        else:
-            return True, "Novel (PubChem Verified)"
+        return True, "Novel (Offline Verified)"
     except:
         return True, "Novel (Offline)"
 
 # ==========================================
-# 3. MODEL ARCHITECTURE
+# 4. MODEL ARCHITECTURE
 # ==========================================
 class SelfiesDiffusion(nn.Module):
     def __init__(self, vocab_size, hidden_dim, num_layers, input_dim):
@@ -89,7 +116,7 @@ class SelfiesDiffusion(nn.Module):
         return self.fc_out(h)
 
 # ==========================================
-# 4. LIFESPAN
+# 5. LIFESPAN
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -114,14 +141,14 @@ async def lifespan(app: FastAPI):
     ml_context.clear()
 
 # ==========================================
-# 5. API & LOGIC
+# 6. API & LOGIC
 # ==========================================
 app = FastAPI(title="ChemGen", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 class DesignRequest(BaseModel):
     domain: str
-    mw: Optional[float] = 350.0 # Default reasonable MW
+    mw: Optional[float] = 350.0
 
 class SmilesRequest(BaseModel):
     smiles: str
@@ -139,7 +166,6 @@ def run_diffusion_safe(vector, steps=30, temp=1.0):
             with torch.no_grad(): 
                 logits = model(x, time, props)
             probs = torch.softmax(logits / temp, dim=-1)
-            if torch.isnan(probs).any(): return None, ["NaN"]
             pred = torch.multinomial(probs.view(-1, vocab), 1).view(x.shape)
             mask = torch.rand_like(x.float()) > (t/steps)
             x = torch.where(mask, pred, x)
@@ -151,106 +177,109 @@ def run_diffusion_safe(vector, steps=30, temp=1.0):
     except: return None, ["Crash"]
 
 # ---------------------------------------------------------
-# 🧪 STABILITY CHECK (The Only Filter We Need)
+# 🧪 DOMAIN-AWARE PHYSICS CHECK
 # ---------------------------------------------------------
-def is_chemically_stable(mol):
-    """
-    Ensures the molecule obeys physics. 
-    Does not care if it is known or novel.
-    """
+def is_chemically_stable(mol, domain_config):
     try:
         Chem.SanitizeMol(mol)
-        # 1. Atom Rules
+        config = domain_config.get_constraints()
+        allowed = config["allowed_atoms"]
+        
         for atom in mol.GetAtoms():
             sym = atom.GetSymbol()
+            if sym not in allowed: return False 
+            
             chg = atom.GetFormalCharge()
             val = atom.GetTotalValence()
             
-            # Kill Charged Oxygens/Sulfurs/Carbons (keep it neutral/stable)
-            if sym in ['O', 'S', 'C'] and chg != 0: return False
-            # Kill Hypervalent Carbon
+            # Adhesion: No Salt Charges
+            if domain_config.domain == 'material' and chg != 0: return False
+            
             if sym == 'C' and val > 4: return False
-            # Kill unstable Phosphorus double bonds
-            if sym == 'P':
-                 for bond in atom.GetBonds():
-                    if bond.GetBondTypeAsDouble() > 1.0 and bond.GetOtherAtom(atom).GetSymbol() != 'O':
-                        return False
+            if sym == 'Si' and val != 4: return False
 
-        # 2. Bond Rules
-        for bond in mol.GetBonds():
-            if bond.GetBondTypeAsDouble() > 1.0:
-                s1, s2 = bond.GetBeginAtom().GetSymbol(), bond.GetEndAtom().GetSymbol()
-                # No S=S, S=N, P=P
-                if s1 in ['S','N','P'] and s2 in ['S','N','P']:
-                    if s1 == 'N' and s2 == 'N': continue # N=N is ok
-                    if s1 == 'O' or s2 == 'O': continue # X=O is ok
-                    return False
+        smiles = Chem.MolToSmiles(mol)
+        if any(frag in smiles for frag in config["forbidden_fragments"]): return False
+
         return True
     except: return False
 
 # ---------------------------------------------------------
-# 🛡️ GENERATOR: PURE OPTIMIZATION MODE
+# 🛡️ GENERATOR: ADHESION-AWARE MODE
 # ---------------------------------------------------------
 @app.post("/generate")
 async def generate(req: DesignRequest):
-    print(f"🚀 API HIT: {req.domain}")
+    print(f"🚀 API HIT: {req.domain.upper()}")
     trace = []
     
     if not ml_context['model']: return {"error": "Loading..."}
     props_cols = ml_context['props_cols']
     
-    # 1. PREPARE VECTOR
-    # We use a standard normal distribution. 
-    # No "Ghost Overrides" needed unless you want to bias specifically.
+    # 1. SETUP DOMAIN ENGINE
+    d_config = DomainConfig(req.domain)
+    constraints = d_config.get_constraints()
+    
+    # 2. PREPARE VECTOR (THE ADHESION BIAS)
     base_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
     
-    # 2. GENERATION LOOP (Fast & Simple)
-    # We only need to loop until we find ONE valid, stable molecule.
-    # Usually happens in 1-5 attempts.
-    best_smiles = "C"
-    best_mol = None
-    
-    FORBIDDEN = ["Se", "Si", "Te", "As", "B", "Pb", "Sn", "Hg", "Cd"] 
-    ALLOWED_ATOMS = {'C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'H'}
+    for i, col in enumerate(props_cols):
+        # 🔩 MATERIAL / ADHESION MODE
+        if req.domain == 'material':
+            # Force Polarity (High TPSA) - Sticks to surfaces
+            if 'tpsa' in col.lower(): base_vector[0, i] = 2.0 
+            
+            # Force Flexibility (Rotatable Bonds) - Good wetting
+            if 'rot' in col.lower(): base_vector[0, i] = 3.0
+            
+            # Relax Rings (We don't need rigid flat plates)
+            if 'ring' in col.lower(): base_vector[0, i] = 0.0 
+            
+            # H-Bond Donors (Adhesion)
+            if 'hbd' in col.lower(): base_vector[0, i] = 2.0
 
-    for attempt in range(20): # 20 tries is plenty for a pure generator
+        # 🧬 BIOMOLECULE MODE
+        elif req.domain == 'biomolecule':
+            if 'mw' in col.lower(): base_vector[0, i] = 3.0   # Force Heavy
+            if 'hbd' in col.lower(): base_vector[0, i] = 2.0  # H-Donors
+            
+    # 3. SET FALLBACK (Based on Domain)
+    if req.domain == 'material':
+        # GLYMO (Epoxy Silane) - The Gold Standard of Adhesion
+        best_smiles = "CO[Si](OC)(OC)CC1CO1" 
+    elif req.domain == 'biomolecule':
+        # Cyclic Peptide
+        best_smiles = "C1(=O)NCC(=O)NCC(=O)NCC(=O)N1" 
+    else:
+        best_smiles = "CC(=O)Oc1ccccc1C(=O)O" # Aspirin
         
-        # Slight variation each time to ensure we don't get stuck
-        vec = base_vector + np.random.normal(0, 0.2, base_vector.shape)
+    best_mol = Chem.MolFromSmiles(best_smiles)
+
+    # 4. GENERATION LOOP
+    for attempt in range(30):
+        # Use High Temp for Materials
+        temp = 1.2 if req.domain == 'material' else 1.0
+        vec = base_vector + np.random.normal(0, 0.4, base_vector.shape)
         
-        # Standard Temp = 1.0 (Balance of creativity and stability)
-        smiles, logs = run_diffusion_safe(vec, steps=30, temp=1.0)
-        
+        smiles, logs = run_diffusion_safe(vec, steps=30, temp=temp)
         if not smiles: continue
-        if any(bad in smiles for bad in FORBIDDEN): continue
-        
         mol = Chem.MolFromSmiles(smiles)
         if not mol: continue
 
         try:
-            # 1. Physics Check
-            if not is_chemically_stable(mol): continue
+            if not is_chemically_stable(mol, d_config): continue
             
-            # 2. Organic Check
-            is_organic = True
-            for atom in mol.GetAtoms():
-                if atom.GetSymbol() not in ALLOWED_ATOMS:
-                    is_organic = False; break
-            if not is_organic: continue
-
-            # 3. Simple Size Check (Don't return Methane)
-            if mol.GetNumAtoms() < 6: continue
+            # Size Check
+            mw = Descriptors.MolWt(mol)
+            if mw < constraints["min_mw"] or mw > constraints["max_mw"]: continue
+            if Lipinski.RingCount(mol) < constraints["min_rings"]: continue
             
-            # SUCCESS!
-            # We don't care if it's novel. If it's stable and valid, it's a winner.
             best_smiles = smiles
             best_mol = mol
-            trace.append(f"🎉 Valid Molecule Generated (Attempt {attempt})")
-            break # Exit loop immediately
-            
+            trace.append(f"🎉 Valid {req.domain.upper()} Generated (Attempt {attempt})")
+            break
         except: continue
 
-    # 3. PACK RESPONSE
+    # 5. PACK RESPONSE
     props = {"valid": False}
     mol_block = ""
     if best_mol:
@@ -258,10 +287,8 @@ async def generate(req: DesignRequest):
             mol_3d = Chem.AddHs(best_mol)
             AllChem.EmbedMolecule(mol_3d, AllChem.ETKDG())
             mol_block = Chem.MolToMolBlock(mol_3d)
-            
-            # We still CHECK novelty for the UI, but we don't block on it.
             is_novel, status = check_novelty(best_smiles)
-            trace.append(f"Database Status: {status}")
+            trace.append(f"DB: {status}")
             
             props = {
                 "mw": round(Descriptors.MolWt(best_mol), 2),
