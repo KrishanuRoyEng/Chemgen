@@ -290,12 +290,24 @@ async def generate(req: DesignRequest):
             is_novel, status = check_novelty(best_smiles)
             trace.append(f"DB: {status}")
             
+            tpsa_val = Descriptors.TPSA(best_mol)
+            rot_val = Lipinski.NumRotatableBonds(best_mol)
+            mw_val = Descriptors.MolWt(best_mol)
+            hbd_val = Lipinski.NumHDonors(best_mol)
+            hba_val = Lipinski.NumHAcceptors(best_mol)
+
             props = {
-                "mw": round(Descriptors.MolWt(best_mol), 2),
+                "mw": round(mw_val, 2),
                 "logp": round(Descriptors.MolLogP(best_mol), 2),
-                "tpsa": round(Descriptors.TPSA(best_mol), 1),
+                "tpsa": round(tpsa_val, 1),
                 "qed": round(QED.qed(best_mol), 3),
-                "sas": round(3 + (Descriptors.MolWt(best_mol)/100), 1),
+                "sas": round(3 + (mw_val/100), 1),
+                "hbd": hbd_val,
+                "hba": hba_val,
+                "rings": Lipinski.RingCount(best_mol),
+                "rot": rot_val,
+                "adhesion": round(min(10.0, (tpsa_val / 20) + (rot_val / 2)), 1),
+                "affinity": round(min(10.0, (mw_val / 50) + hbd_val + hba_val), 1),
                 "is_novel": is_novel,
                 "valid": True
             }
@@ -308,12 +320,26 @@ async def analyze(req: SmilesRequest):
     mol = Chem.MolFromSmiles(req.smiles)
     if not mol: return {"error": "Invalid"}
     is_novel, status = check_novelty(req.smiles)
+    
+    # 🟢 REPLACE THE RETURN BLOCK WITH THIS
+    tpsa_val = Descriptors.TPSA(mol)
+    rot_val = Lipinski.NumRotatableBonds(mol)
+    mw_val = Descriptors.MolWt(mol)
+    hbd_val = Lipinski.NumHDonors(mol)
+    hba_val = Lipinski.NumHAcceptors(mol)
+    
     return {
-        "mw": round(Descriptors.MolWt(mol), 2),
+        "mw": round(mw_val, 2),
         "logp": round(Descriptors.MolLogP(mol), 2),
-        "tpsa": round(Descriptors.TPSA(mol), 2),
+        "tpsa": round(tpsa_val, 2),
         "qed": round(QED.qed(mol), 3),
-        "sas": round(3 + (Descriptors.MolWt(mol) / 100), 1),
+        "sas": round(3 + (mw_val / 100), 1),
+        "hbd": hbd_val,
+        "hba": hba_val,
+        "rings": Lipinski.RingCount(mol),
+        "rot": rot_val,
+        "adhesion": round(min(10.0, (tpsa_val / 20) + (rot_val / 2)), 1),
+        "affinity": round(min(10.0, (mw_val / 50) + hbd_val + hba_val), 1),
         "is_novel": is_novel,
         "valid": True
     }
