@@ -23,7 +23,7 @@ const ControlDeck = ({
     const domains = [
         { id: 'drug', label: 'Drug Discovery', icon: Beaker, color: 'text-neon-blue', border: 'border-neon-blue' },
         { id: 'material', label: 'Material Sci', icon: Zap, color: 'text-neon-purple', border: 'border-neon-purple' },
-        { id: 'bio', label: 'Bio-Defense', icon: Brain, color: 'text-neon-green', border: 'border-neon-green' },
+        { id: 'biomolecule', label: 'Bio-Molecule', icon: Brain, color: 'text-neon-green', border: 'border-neon-green' },
     ];
 
     const activeDomain = domains.find(d => d.id === domain);
@@ -146,7 +146,7 @@ const ControlDeck = ({
                 <motion.div key={domain} className={clsx("p-4 rounded-lg border border-dashed", activeDomain.border)}>
                     {domain === 'drug' && <div className="text-center text-[10px] text-gray-400 font-mono">TARGET: GENERIC SMALL MOLECULE<br />STATUS: <span className="text-neon-green">ACTIVE</span></div>}
                     {domain === 'material' && <Slider label="ADHESION STRENGTH" value={adhesion} min={0} max={10} step={0.5} unit=" / 10" color="accent-neon-purple" onChange={setAdhesion} tooltip={PROPERTY_TOOLTIPS.adhesion} />}
-                    {domain === 'bio' && <Slider label="BINDING AFFINITY" value={affinity} min={4} max={12} step={0.5} unit=" -logKd" color="accent-neon-green" onChange={setAffinity} tooltip={PROPERTY_TOOLTIPS.affinity} />}
+                    {domain === 'biomolecule' && <Slider label="BINDING AFFINITY" value={affinity} min={4} max={12} step={0.5} unit=" -logKd" color="accent-neon-green" onChange={setAffinity} tooltip={PROPERTY_TOOLTIPS.affinity} />}
                 </motion.div>
             </div>
 
