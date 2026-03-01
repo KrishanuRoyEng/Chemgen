@@ -64,7 +64,7 @@ class DomainConfig:
         elif self.domain == 'biomolecule':
             return {
                 "allowed_atoms": {'C', 'N', 'O', 'S', 'P', 'H'},
-                "min_mw": 400, 
+                "min_mw": 200, 
                 "max_mw": 2000,
                 "min_rings": 0, 
                 "forbidden_fragments": ["Cl", "Br", "I", "F"]
@@ -280,9 +280,9 @@ async def generate(req: DesignRequest):
 
         # 🧬 BIOMOLECULE MODE (FIXED!)
         elif req.domain == 'biomolecule':
-            if 'mw' in col.lower(): base_vector[0, i] += (req.affinity / 2.0) # UI Affinity!
-            if 'hbd' in col.lower(): base_vector[0, i] += 1.0  # Boost donors
-            if 'hba' in col.lower(): base_vector[0, i] += 1.0  # Boost acceptors
+            if 'mw' in col.lower(): base_vector[0, i] += (req.affinity / 10.0) 
+            if 'hbd' in col.lower(): base_vector[0, i] += 0.5  
+            if 'hba' in col.lower(): base_vector[0, i] += 0.5
 
         # 💊 DRUG MODE 
         elif req.domain == 'drug':
@@ -300,7 +300,7 @@ async def generate(req: DesignRequest):
     best_mol = Chem.MolFromSmiles(best_smiles)
 
     # 4. GENERATION LOOP (FIXED: 100 ATTEMPTS)
-    for attempt in range(100):
+    for attempt in range(2000):
         # Use higher Temp for Materials/Bio to explore wilder chemical space
         temp = 1.3 if req.domain == 'material' else 1.2 if req.domain == 'biomolecule' else 1.0
         vec = base_vector + np.random.normal(0, 0.4, base_vector.shape)
