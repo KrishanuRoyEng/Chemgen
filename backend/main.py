@@ -148,7 +148,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 class DesignRequest(BaseModel):
     domain: str
-    mw: Optional[float] = 350.0
+    mw: float = 350.0
+    logp: float = 2.5
+    tpsa: float = 70.0
+    qed: float = 0.5
+    rings: float = 2.0
+    rot: float = 5.0
+    adhesion: float = 5.0
+    affinity: float = 8.0
+    hbd: float = 2.0
+    hba: float = 5.0
+    toxicity: float = 0.1
 
 class SmilesRequest(BaseModel):
     smiles: str
@@ -177,7 +187,7 @@ def run_diffusion_safe(vector, steps=30, temp=1.0):
     except: return None, ["Crash"]
 
 # ---------------------------------------------------------
-# 🧪 DOMAIN-AWARE PHYSICS CHECK
+# 🧪 DOMAIN-AWARE PHYSICS & MEDICINAL CHEMISTRY CHECK
 # ---------------------------------------------------------
 def is_chemically_stable(mol, domain_config):
     try:
@@ -185,6 +195,7 @@ def is_chemically_stable(mol, domain_config):
         config = domain_config.get_constraints()
         allowed = config["allowed_atoms"]
         
+        # 1. ATOM-LEVEL VALENCY & CHARGE CHECKS
         for atom in mol.GetAtoms():
             sym = atom.GetSymbol()
             if sym not in allowed: return False 
@@ -192,14 +203,31 @@ def is_chemically_stable(mol, domain_config):
             chg = atom.GetFormalCharge()
             val = atom.GetTotalValence()
             
-            # Adhesion: No Salt Charges
-            if domain_config.domain == 'material' and chg != 0: return False
+            # STRICT CHARGE PENALTY: Drugs & Materials shouldn't have random formal charges
+            if domain_config.domain in ['drug', 'material'] and chg != 0: 
+                return False
             
+            # Basic valency limits
             if sym == 'C' and val > 4: return False
             if sym == 'Si' and val != 4: return False
 
+        # 2. STRING-LEVEL FORBIDDEN FRAGMENTS
         smiles = Chem.MolToSmiles(mol)
         if any(frag in smiles for frag in config["forbidden_fragments"]): return False
+
+        # 3. SMARTS FILTERS (The "Bouncer" for Toxic/Unstable Structures)
+        pains_and_strains = [
+            Chem.MolFromSmarts("[S]~[F,Cl,Br,I]"), # Sulfur-Halogen (Violently reactive warheads)
+            Chem.MolFromSmarts("[O]-[O]"),         # Peroxide bonds (Highly explosive)
+            Chem.MolFromSmarts("C1=CC1"),          # Cyclopropene (Extreme ring strain)
+            Chem.MolFromSmarts("[N]=[N]-[N]"),     # Azides (Explosive/Reactive)
+            Chem.MolFromSmarts("[C-], [C+]"),      # Carbanions/Carbocations
+            Chem.MolFromSmarts("[*]=[*]=[*]")      # Cumulenes (Highly unstable)
+        ]
+
+        for alert in pains_and_strains:
+            if alert and mol.HasSubstructMatch(alert):
+                return False # Reject the hallucination immediately!
 
         return True
     except: return False
@@ -219,45 +247,62 @@ async def generate(req: DesignRequest):
     d_config = DomainConfig(req.domain)
     constraints = d_config.get_constraints()
     
-    # 2. PREPARE VECTOR (THE ADHESION BIAS)
-    base_vector = np.random.normal(0, 1.0, (1, len(props_cols)))
-    
+    user_props = []
+    for col in props_cols:
+        c = col.lower()
+        if 'mw' in c: user_props.append(req.mw)
+        elif 'logp' in c: user_props.append(req.logp)
+        elif 'tpsa' in c: user_props.append(req.tpsa)
+        elif 'qed' in c: user_props.append(req.qed)
+        elif 'rot' in c: user_props.append(req.rot)
+        elif 'ring' in c: user_props.append(req.rings)
+        elif 'hbd' in c: user_props.append(req.hbd)
+        elif 'hba' in c: user_props.append(req.hba)
+        else: user_props.append(0.0) # Safe default
+        
+    base_vector = np.array([user_props])
+
+    if ml_context['scaler']:
+        try:
+            # Slice the first 12 columns, scale them, and stitch the rest back on
+            scaled_12 = ml_context['scaler'].transform(base_vector[:, :12])
+            base_vector = np.hstack((scaled_12, base_vector[:, 12:]))
+        except Exception as e:
+            print(f"Scaler warning bypassed: {e}")
+            pass
+
     for i, col in enumerate(props_cols):
         # 🔩 MATERIAL / ADHESION MODE
         if req.domain == 'material':
-            # Force Polarity (High TPSA) - Sticks to surfaces
-            if 'tpsa' in col.lower(): base_vector[0, i] = 2.0 
-            
-            # Force Flexibility (Rotatable Bonds) - Good wetting
-            if 'rot' in col.lower(): base_vector[0, i] = 3.0
-            
-            # Relax Rings (We don't need rigid flat plates)
-            if 'ring' in col.lower(): base_vector[0, i] = 0.0 
-            
-            # H-Bond Donors (Adhesion)
-            if 'hbd' in col.lower(): base_vector[0, i] = 2.0
+            if 'tpsa' in col.lower(): base_vector[0, i] += 1.0 # Boost polarity
+            if 'rot' in col.lower(): base_vector[0, i] += (req.adhesion / 3.0) # UI Adhesion!
+            if 'ring' in col.lower(): base_vector[0, i] -= 1.0 # Less rings
 
-        # 🧬 BIOMOLECULE MODE
+        # 🧬 BIOMOLECULE MODE (FIXED!)
         elif req.domain == 'biomolecule':
-            if 'mw' in col.lower(): base_vector[0, i] = 3.0   # Force Heavy
-            if 'hbd' in col.lower(): base_vector[0, i] = 2.0  # H-Donors
-            
+            if 'mw' in col.lower(): base_vector[0, i] += (req.affinity / 2.0) # UI Affinity!
+            if 'hbd' in col.lower(): base_vector[0, i] += 1.0  # Boost donors
+            if 'hba' in col.lower(): base_vector[0, i] += 1.0  # Boost acceptors
+
+        # 💊 DRUG MODE 
+        elif req.domain == 'drug':
+            # A strict (low) toxicity limit forces the model to generate more water-soluble (lower LogP) drugs
+            if 'logp' in col.lower(): base_vector[0, i] += (req.toxicity - 0.5) * 2.0
+   
     # 3. SET FALLBACK (Based on Domain)
     if req.domain == 'material':
-        # GLYMO (Epoxy Silane) - The Gold Standard of Adhesion
         best_smiles = "CO[Si](OC)(OC)CC1CO1" 
     elif req.domain == 'biomolecule':
-        # Cyclic Peptide
         best_smiles = "C1(=O)NCC(=O)NCC(=O)NCC(=O)N1" 
     else:
-        best_smiles = "CC(=O)Oc1ccccc1C(=O)O" # Aspirin
+        best_smiles = "CC(=O)Oc1ccccc1C(=O)O" 
         
     best_mol = Chem.MolFromSmiles(best_smiles)
 
-    # 4. GENERATION LOOP
-    for attempt in range(30):
-        # Use High Temp for Materials
-        temp = 1.2 if req.domain == 'material' else 1.0
+    # 4. GENERATION LOOP (FIXED: 100 ATTEMPTS)
+    for attempt in range(100):
+        # Use higher Temp for Materials/Bio to explore wilder chemical space
+        temp = 1.3 if req.domain == 'material' else 1.2 if req.domain == 'biomolecule' else 1.0
         vec = base_vector + np.random.normal(0, 0.4, base_vector.shape)
         
         smiles, logs = run_diffusion_safe(vec, steps=30, temp=temp)
@@ -314,7 +359,6 @@ async def generate(req: DesignRequest):
         except: pass
 
     return {"smiles": best_smiles, "mol_block": mol_block, "properties": props, "trace": trace}
-
 @app.post("/analyze")
 async def analyze(req: SmilesRequest):
     mol = Chem.MolFromSmiles(req.smiles)

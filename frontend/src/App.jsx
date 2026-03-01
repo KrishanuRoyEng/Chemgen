@@ -61,6 +61,11 @@ function App() {
           body: JSON.stringify({ smiles }),
         });
         const props = await propRes.json();
+        if (props.error) {
+          console.warn(`Skipping ${name}: Backend could not parse SMILES`);
+          continue;
+        }
+
         allChemicalData.push(props);
       }
 
@@ -130,6 +135,11 @@ function App() {
         body: JSON.stringify(payload),
       });
       const data = await response.json();
+
+      if (!response.ok || data.detail || data.error) {
+        throw new Error(data.error || "Backend validation failed");
+      }
+
       console.log("🚀 BACKEND RESPONSE:", data); // DEBUG TRACE
       if (data.trace) console.log("📝 SERVER TRACE:", data.trace);
 
@@ -139,7 +149,7 @@ function App() {
       }, 1500);
     } catch (e) {
       console.error(e);
-      alert("Synthesis Error: Connection reset by peer.");
+      alert(`Synthesis Error: ${e.message}`);
       setProcessStatus("IDLE");
     }
   };
