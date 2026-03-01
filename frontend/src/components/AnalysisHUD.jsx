@@ -34,8 +34,39 @@ const AnalysisHUD = ({ result, loading }) => {
     const sasColor = sas < 3 ? 'text-neon-green' : sas < 6 ? 'text-yellow-400' : 'text-danger-red';
     const sasLabel = sas < 3 ? 'EASY' : sas < 6 ? 'MODERATE' : 'COMPLEX';
 
-    // Confidence Logic: (QED * 100) +/- random noise for realism
+    // Confidence Logic
     const confidence = Math.min(99.9, Math.max(80, (props.qed * 100) + 5)).toFixed(1);
+
+    // 🟢 DYNAMIC DOMAIN METRICS (Boxes 3 and 4)
+    let prop3Label = "TPSA";
+    let prop3Value = `${props.tpsa?.toFixed(1)} Å²`;
+    let prop3Color = "text-white";
+    let prop3Tooltip = PROPERTY_TOOLTIPS?.tpsa;
+
+    let prop4Label = "QUALITY (QED)";
+    let prop4Value = props.qed?.toFixed(3);
+    let prop4Color = "text-neon-green";
+    let prop4Tooltip = PROPERTY_TOOLTIPS?.qed;
+
+    if (domain === 'material') {
+        prop3Label = "FLEXIBILITY";
+        prop3Value = `${props.rot} ROT`;
+        prop3Tooltip = PROPERTY_TOOLTIPS?.rot || "Rotatable Bonds";
+
+        prop4Label = "ADHESION";
+        prop4Value = `${props.adhesion?.toFixed(1)} / 10`;
+        prop4Color = "text-neon-purple";
+        prop4Tooltip = PROPERTY_TOOLTIPS?.adhesion;
+    } else if (domain === 'biomolecule') {
+        prop3Label = "H-BONDS (D/A)";
+        prop3Value = `${props.hbd} / ${props.hba}`;
+        prop3Tooltip = PROPERTY_TOOLTIPS?.hbd || "Hydrogen Bond Donors / Acceptors";
+
+        prop4Label = "AFFINITY";
+        prop4Value = `${props.affinity?.toFixed(1)} pKd`;
+        prop4Color = "text-neon-green";
+        prop4Tooltip = PROPERTY_TOOLTIPS?.affinity;
+    }
 
     return (
         <motion.div
@@ -54,10 +85,9 @@ const AnalysisHUD = ({ result, loading }) => {
                 </div>
             </div>
 
-            {/* Novelty/Database Badge - UPDATED LOGIC */}
+            {/* Novelty/Database Badge */}
             <div className={clsx(
                 "p-4 border-l-4 rounded bg-black/40 flex items-center justify-between relative overflow-hidden",
-                // Green for Novel, Blue for Verified (Known)
                 isNovel ? "border-neon-green" : "border-neon-blue"
             )}>
                 <div className="relative z-10">
@@ -78,10 +108,10 @@ const AnalysisHUD = ({ result, loading }) => {
             {/* Synthesizability Gauge */}
             <div className="bg-white/5 p-3 rounded-lg">
                 <div className="flex justify-between items-end mb-2">
-                    <Tooltip content={PROPERTY_TOOLTIPS.sas}>
+                    <Tooltip content={PROPERTY_TOOLTIPS?.sas}>
                         <span className="text-[10px] font-mono text-gray-400 cursor-help border-b border-dotted border-gray-600 hover:text-white transition-colors">SYNTHESIZABILITY (SAS)</span>
                     </Tooltip>
-                    <span className={clsx("text-sm font-bold font-mono", sasColor)}>{sas} / 10</span>
+                    <span className={clsx("text-sm font-bold font-mono", sasColor)}>{sas.toFixed(1)} / 10</span>
                 </div>
                 <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
                     <motion.div
@@ -100,10 +130,12 @@ const AnalysisHUD = ({ result, loading }) => {
 
             {/* 12-Prop Results Grid */}
             <div className="grid grid-cols-2 gap-2">
-                <PropBox label="WEIGHT" value={`${props.mw?.toFixed(1)} Da`} color="text-neon-blue" tooltip={PROPERTY_TOOLTIPS.mw} />
-                <PropBox label="LOG P" value={props.logp?.toFixed(2)} color="text-neon-purple" tooltip={PROPERTY_TOOLTIPS.logp} />
-                <PropBox label="TPSA" value={`${props.tpsa?.toFixed(1)} Å²`} color="text-white" tooltip={PROPERTY_TOOLTIPS.tpsa} />
-                <PropBox label="QUALITY (QED)" value={props.qed?.toFixed(3)} color="text-neon-green" tooltip={PROPERTY_TOOLTIPS.qed} />
+                <PropBox label="WEIGHT" value={`${props.mw?.toFixed(1)} Da`} color="text-neon-blue" tooltip={PROPERTY_TOOLTIPS?.mw} />
+                <PropBox label="LOG P" value={props.logp?.toFixed(2)} color="text-neon-purple" tooltip={PROPERTY_TOOLTIPS?.logp} />
+
+                {/* 🟢 DYNAMIC PROP BOXES */}
+                <PropBox label={prop3Label} value={prop3Value} color={prop3Color} tooltip={prop3Tooltip} />
+                <PropBox label={prop4Label} value={prop4Value} color={prop4Color} tooltip={prop4Tooltip} />
             </div>
 
             {/* System Status Footer */}
